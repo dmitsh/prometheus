@@ -54,6 +54,9 @@ const (
 
 	authMethodOAuth           = "OAuth"
 	authMethodManagedIdentity = "ManagedIdentity"
+
+	powerStatePrefix  = "PowerState/"
+	powerStateRunning = powerStatePrefix + "running"
 )
 
 // DefaultSDConfig is the default Azure SD configuration.
@@ -147,10 +150,11 @@ type azureClient struct {
 	vm     compute.VirtualMachinesClient
 	vmss   compute.VirtualMachineScaleSetsClient
 	vmssvm compute.VirtualMachineScaleSetVMsClient
+	logger log.Logger
 }
 
 // createAzureClient is a helper function for creating an Azure compute client to ARM.
-func createAzureClient(cfg SDConfig) (azureClient, error) {
+func createAzureClient(cfg SDConfig, logger log.Logger) (azureClient, error) {
 	env, err := azure.EnvironmentFromName(cfg.Environment)
 	if err != nil {
 		return azureClient{}, err
@@ -200,13 +204,16 @@ func createAzureClient(cfg SDConfig) (azureClient, error) {
 	c.vmssvm = compute.NewVirtualMachineScaleSetVMsClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
 	c.vmssvm.Authorizer = bearerAuthorizer
 
+	c.logger = logger
+
 	return c, nil
 }
 
 // azureResource represents a resource identifier in Azure.
 type azureResource struct {
-	Name          string
 	ResourceGroup string
+	Name          string
+	Subname       string
 }
 
 // virtualMachine represents an Azure virtual machine (which can also be created by a VMSS)
@@ -234,16 +241,22 @@ func newAzureResourceFromID(id string, logger log.Logger) (azureResource, error)
 		return azureResource{}, err
 	}
 
+	var subname string
+	if len(s) == 11 {
+		subname = strings.ToLower(s[10])
+	}
+
 	return azureResource{
-		Name:          strings.ToLower(s[8]),
 		ResourceGroup: strings.ToLower(s[4]),
+		Name:          strings.ToLower(s[8]),
+		Subname:       subname,
 	}, nil
 }
 
 func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	defer level.Debug(d.logger).Log("msg", "Azure discovery completed")
 
-	client, err := createAzureClient(*d.cfg)
+	client, err := createAzureClient(*d.cfg, d.logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create Azure client")
 	}
@@ -324,18 +337,9 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 					continue
 				}
 
-				// Unfortunately Azure does not return information on whether a VM is deallocated.
-				// This information is available via another API call however the Go SDK does not
-				// yet support this. On deallocated machines, this value happens to be nil so it
-				// is a cheap and easy way to determine if a machine is allocated or not.
-				if networkInterface.Primary == nil {
-					level.Debug(d.logger).Log("msg", "Skipping deallocated virtual machine", "machine", vm.Name)
-					return
-				}
-
 				if *networkInterface.Primary {
 					for _, ip := range *networkInterface.IPConfigurations {
-						if ip.PublicIPAddress != nil {
+						if ip.PublicIPAddress != nil && ip.PublicIPAddress.PublicIPAddressPropertiesFormat != nil {
 							labels[azureLabelMachinePublicIP] = model.LabelValue(*ip.PublicIPAddress.IPAddress)
 						}
 						if ip.PrivateIPAddress != nil {
@@ -372,6 +376,48 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	return []*targetgroup.Group{&tg}, nil
 }
 
+// isRunningVM return true if the VM is up and running
+// ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
+func (client *azureClient) isRunningVM(ctx context.Context, vm *compute.VirtualMachine) bool {
+	r, err := newAzureResourceFromID(*vm.ID, client.logger)
+	if err != nil {
+		return false
+	}
+	instanceView, err := client.vm.InstanceView(ctx, r.ResourceGroup, *vm.Name)
+	if err != nil {
+		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VM name", *vm.Name, "err", err)
+		return false
+	}
+	for _, status := range *instanceView.Statuses {
+		if strings.HasPrefix(*status.Code, powerStatePrefix) && strings.Compare(*status.Code, powerStateRunning) != 0 {
+			level.Info(client.logger).Log("msg", "virtual machine is not running", "VM name", *vm.Name, "status", *status.Code)
+			return false
+		}
+	}
+	return true
+}
+
+// isRunningScaleSetVM return true if the VM is up and running
+// ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
+func (client *azureClient) isRunningScaleSetVM(ctx context.Context, vmss *compute.VirtualMachineScaleSet, vm *compute.VirtualMachineScaleSetVM) bool {
+	r, err := newAzureResourceFromID(*vm.ID, client.logger)
+	if err != nil {
+		return false
+	}
+	instanceView, err := client.vmssvm.GetInstanceView(ctx, r.ResourceGroup, *vmss.Name, r.Subname)
+	if err != nil {
+		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VMSS name", *vmss.Name, "VM name", *vm.Name, "err", err)
+		return false
+	}
+	for _, status := range *instanceView.Statuses {
+		if strings.HasPrefix(*status.Code, powerStatePrefix) && strings.Compare(*status.Code, powerStateRunning) != 0 {
+			level.Info(client.logger).Log("msg", "virtual machine is not running", "VM name", *vm.Name, "status", *status.Code)
+			return false
+		}
+	}
+	return true
+}
+
 func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error) {
 	var vms []virtualMachine
 	result, err := client.vm.ListAll(ctx)
@@ -380,7 +426,9 @@ func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error)
 	}
 	for result.NotDone() {
 		for _, vm := range result.Values() {
-			vms = append(vms, mapFromVM(vm))
+			if client.isRunningVM(ctx, &vm) {
+				vms = append(vms, mapFromVM(vm))
+			}
 		}
 		err = result.NextWithContext(ctx)
 		if err != nil {
@@ -423,7 +471,9 @@ func (client *azureClient) getScaleSetVMs(ctx context.Context, scaleSet compute.
 	}
 	for result.NotDone() {
 		for _, vm := range result.Values() {
-			vms = append(vms, mapFromVMScaleSetVM(vm, *scaleSet.Name))
+			if client.isRunningScaleSetVM(ctx, &scaleSet, &vm) {
+				vms = append(vms, mapFromVMScaleSetVM(vm, *scaleSet.Name))
+			}
 		}
 		err = result.NextWithContext(ctx)
 		if err != nil {
