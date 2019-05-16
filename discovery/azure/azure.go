@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -55,9 +56,15 @@ const (
 	authMethodOAuth           = "OAuth"
 	authMethodManagedIdentity = "ManagedIdentity"
 
-	powerStatePrefix  = "PowerState/"
-	powerStateRunning = powerStatePrefix + "running"
+	powerStateFormat  = `^PowerState/(\w+)$`
+	powerStateRunning = "running"
 )
+
+var powerStateRE *regexp.Regexp
+
+func init() {
+	powerStateRE = regexp.MustCompile(powerStateFormat)
+}
 
 // DefaultSDConfig is the default Azure SD configuration.
 var DefaultSDConfig = SDConfig{
@@ -163,7 +170,7 @@ func createAzureClient(cfg SDConfig, logger log.Logger) (azureClient, error) {
 	activeDirectoryEndpoint := env.ActiveDirectoryEndpoint
 	resourceManagerEndpoint := env.ResourceManagerEndpoint
 
-	var c azureClient
+	c := azureClient{logger: logger}
 
 	var spt *adal.ServicePrincipalToken
 
@@ -203,8 +210,6 @@ func createAzureClient(cfg SDConfig, logger log.Logger) (azureClient, error) {
 
 	c.vmssvm = compute.NewVirtualMachineScaleSetVMsClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
 	c.vmssvm.Authorizer = bearerAuthorizer
-
-	c.logger = logger
 
 	return c, nil
 }
@@ -339,7 +344,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 
 				if *networkInterface.Primary {
 					for _, ip := range *networkInterface.IPConfigurations {
-						if ip.PublicIPAddress != nil && ip.PublicIPAddress.PublicIPAddressPropertiesFormat != nil {
+						if ip.PublicIPAddress != nil {
 							labels[azureLabelMachinePublicIP] = model.LabelValue(*ip.PublicIPAddress.IPAddress)
 						}
 						if ip.PrivateIPAddress != nil {
@@ -376,8 +381,6 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	return []*targetgroup.Group{&tg}, nil
 }
 
-// isRunningVM return true if the VM is up and running
-// ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
 func (client *azureClient) isRunningVM(ctx context.Context, vm *compute.VirtualMachine) bool {
 	r, err := newAzureResourceFromID(*vm.ID, client.logger)
 	if err != nil {
@@ -388,17 +391,9 @@ func (client *azureClient) isRunningVM(ctx context.Context, vm *compute.VirtualM
 		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VM name", *vm.Name, "err", err)
 		return false
 	}
-	for _, status := range *instanceView.Statuses {
-		if strings.HasPrefix(*status.Code, powerStatePrefix) && strings.Compare(*status.Code, powerStateRunning) != 0 {
-			level.Info(client.logger).Log("msg", "virtual machine is not running", "VM name", *vm.Name, "status", *status.Code)
-			return false
-		}
-	}
-	return true
+	return client.isVMPowerStateRunning(instanceView.Statuses, *vm.Name)
 }
 
-// isRunningScaleSetVM return true if the VM is up and running
-// ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
 func (client *azureClient) isRunningScaleSetVM(ctx context.Context, vmss *compute.VirtualMachineScaleSet, vm *compute.VirtualMachineScaleSetVM) bool {
 	r, err := newAzureResourceFromID(*vm.ID, client.logger)
 	if err != nil {
@@ -409,13 +404,34 @@ func (client *azureClient) isRunningScaleSetVM(ctx context.Context, vmss *comput
 		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VMSS name", *vmss.Name, "VM name", *vm.Name, "err", err)
 		return false
 	}
-	for _, status := range *instanceView.Statuses {
-		if strings.HasPrefix(*status.Code, powerStatePrefix) && strings.Compare(*status.Code, powerStateRunning) != 0 {
-			level.Info(client.logger).Log("msg", "virtual machine is not running", "VM name", *vm.Name, "status", *status.Code)
-			return false
+	return client.isVMPowerStateRunning(instanceView.Statuses, *vm.Name)
+}
+
+// isVMPowerStateRunning returns true if the VM is up and running
+// ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
+func (client *azureClient) isVMPowerStateRunning(statuses *[]compute.InstanceViewStatus, vmName string) bool {
+	if statuses == nil {
+		level.Error(client.logger).Log("msg", "failed to determine power state due to incomplete InstanceView", "VM name", vmName)
+		return false
+	}
+	// []compute.InstanceViewStatus contains VM information such as provisioning status, power state, etc.
+	for _, status := range *statuses {
+		if status.Code != nil {
+			parts := powerStateRE.FindStringSubmatch(*status.Code)
+			if len(parts) == 2 {
+				powerState := parts[1]
+				switch powerState {
+				case powerStateRunning:
+					return true
+				default:
+					level.Debug(client.logger).Log("msg", "virtual machine is not running", "VM name", vmName, "power state", powerState)
+					return false
+				}
+			}
 		}
 	}
-	return true
+	level.Error(client.logger).Log("msg", "failed to determine power state due to missing status", "VM name", vmName)
+	return false
 }
 
 func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error) {
