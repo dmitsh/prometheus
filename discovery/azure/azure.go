@@ -309,10 +309,9 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				return
 			}
 
-			// Skip service discovery for deallocated VM
+			// Skip service discovery for deallocated VM.
 			if strings.EqualFold(vm.PowerState, powerStateDeallocated) {
 				level.Debug(d.logger).Log("msg", "Skipping virtual machine", "VM name", vm.Name, "power state", vm.PowerState)
-				ch <- target{}
 				return
 			}
 

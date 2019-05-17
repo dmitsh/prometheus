@@ -20,6 +20,16 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
 )
 
+var (
+	provisioningStatusCode      = "ProvisioningState/succeeded"
+	provisionDisplayStatus      = "Provisioning succeeded"
+	powerStatusCodeRunning      = "PowerState/running"
+	powerStatusCodeDeallocating = "PowerState/deallocating"
+	powerStatusCodeDeallocated  = "PowerState/deallocated"
+	powerStatusCodeEmpty        = ""
+	powerDisplayStatusRunning   = "VM running"
+)
+
 func TestMapFromVMWithEmptyTags(t *testing.T) {
 	id := "test"
 	name := "name"
@@ -28,10 +38,6 @@ func TestMapFromVMWithEmptyTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
-	provisioningStatusCode := "ProvisioningState/succeeded"
-	provisionDisplayStatus := "Provisioning succeeded"
-	powerStatusCode := "PowerState/running"
-	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -47,9 +53,9 @@ func TestMapFromVMWithEmptyTags(t *testing.T) {
 					DisplayStatus: &provisionDisplayStatus,
 				},
 				{
-					Code:          &powerStatusCode,
+					Code:          &powerStatusCodeRunning,
 					Level:         "Info",
-					DisplayStatus: &powerDisplayStatus,
+					DisplayStatus: &powerDisplayStatusRunning,
 				},
 			},
 		},
@@ -90,10 +96,6 @@ func TestMapFromVMWithTags(t *testing.T) {
 	tags := map[string]*string{
 		"prometheus": new(string),
 	}
-	provisioningStatusCode := "ProvisioningState/succeeded"
-	provisionDisplayStatus := "Provisioning succeeded"
-	powerStatusCode := "PowerState/running"
-	powerDisplayStatus := "VM running"
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
@@ -112,9 +114,9 @@ func TestMapFromVMWithTags(t *testing.T) {
 					DisplayStatus: &provisionDisplayStatus,
 				},
 				{
-					Code:          &powerStatusCode,
+					Code:          &powerStatusCodeRunning,
 					Level:         "Info",
-					DisplayStatus: &powerDisplayStatus,
+					DisplayStatus: &powerDisplayStatusRunning,
 				},
 			},
 		},
@@ -155,10 +157,6 @@ func TestMapFromVMScaleSetVMWithEmptyTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
-	provisioningStatusCode := "ProvisioningState/succeeded"
-	provisionDisplayStatus := "Provisioning succeeded"
-	powerStatusCode := "PowerState/running"
-	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineScaleSetVMProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -174,9 +172,9 @@ func TestMapFromVMScaleSetVMWithEmptyTags(t *testing.T) {
 					DisplayStatus: &provisionDisplayStatus,
 				},
 				{
-					Code:          &powerStatusCode,
+					Code:          &powerStatusCodeRunning,
 					Level:         "Info",
-					DisplayStatus: &powerDisplayStatus,
+					DisplayStatus: &powerDisplayStatusRunning,
 				},
 			},
 		},
@@ -222,10 +220,6 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
-	provisioningStatusCode := "ProvisioningState/succeeded"
-	provisionDisplayStatus := "Provisioning succeeded"
-	powerStatusCode := "PowerState/running"
-	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineScaleSetVMProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -241,9 +235,9 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 					DisplayStatus: &provisionDisplayStatus,
 				},
 				{
-					Code:          &powerStatusCode,
+					Code:          &powerStatusCodeRunning,
 					Level:         "Info",
-					DisplayStatus: &powerDisplayStatus,
+					DisplayStatus: &powerDisplayStatusRunning,
 				},
 			},
 		},
@@ -279,48 +273,54 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 }
 
 func TestGetPowerStatusFromVM(t *testing.T) {
-	provisioningStatusCode := "ProvisioningState/succeeded"
-	provisionDisplayStatus := "Provisioning succeeded"
-	powerStatusCode := "PowerState/running"
-	powerDisplayStatus := "VM running"
-	properties := &compute.VirtualMachineScaleSetVMProperties{
-		StorageProfile: &compute.StorageProfile{
-			OsDisk: &compute.OSDisk{
-				OsType: "Linux",
+	tests := []struct {
+		statuses   *[]compute.InstanceViewStatus
+		powerstate string
+	}{
+		{
+			&[]compute.InstanceViewStatus{
+				{Code: &provisioningStatusCode},
+				{Code: &powerStatusCodeRunning},
 			},
+			"running",
 		},
-		InstanceView: &compute.VirtualMachineScaleSetVMInstanceView{
-			Statuses: &[]compute.InstanceViewStatus{
-				{
-					Code:          &provisioningStatusCode,
-					Level:         "Info",
-					DisplayStatus: &provisionDisplayStatus,
-				},
-				{
-					Code:          &powerStatusCode,
-					Level:         "Info",
-					DisplayStatus: &powerDisplayStatus,
-				},
+		{
+			&[]compute.InstanceViewStatus{
+				{Code: &provisioningStatusCode},
+				{Code: &powerStatusCodeDeallocating},
 			},
+			"deallocating",
+		},
+		{
+			&[]compute.InstanceViewStatus{
+				{Code: &powerStatusCodeDeallocated},
+				{Code: &provisioningStatusCode},
+			},
+			powerStateDeallocated,
+		},
+		{
+			&[]compute.InstanceViewStatus{
+				{Code: &provisioningStatusCode},
+			},
+			powerStateUnknown,
+		},
+		{
+			&[]compute.InstanceViewStatus{
+				{Code: &powerStatusCodeEmpty},
+				{Code: &provisioningStatusCode},
+			},
+			powerStateUnknown,
+		},
+		{
+			nil,
+			powerStateUnknown,
 		},
 	}
 
-	testVM := compute.VirtualMachineScaleSetVM{
-		VirtualMachineScaleSetVMProperties: properties,
-	}
-
-	actual := getPowerState(testVM.VirtualMachineScaleSetVMProperties.InstanceView.Statuses)
-	expected := "running"
-	if actual != expected {
-		t.Errorf("expected powerStatus %s, but got %s instead", expected, actual)
-	}
-
-	// Noq we test a virtualMachine with an empty InstanceView struct.
-	testVM.VirtualMachineScaleSetVMProperties.InstanceView = &compute.VirtualMachineScaleSetVMInstanceView{}
-
-	actual = getPowerState(testVM.VirtualMachineScaleSetVMProperties.InstanceView.Statuses)
-	expected = powerStateUnknown
-	if actual != expected {
-		t.Errorf("expected powerStatus %s, but got %s instead", expected, actual)
+	for _, tc := range tests {
+		powerstate := getPowerState(tc.statuses)
+		if !reflect.DeepEqual(tc.powerstate, powerstate) {
+			t.Errorf("PowerState: expected %v, got: %v", tc.powerstate, powerstate)
+		}
 	}
 }
