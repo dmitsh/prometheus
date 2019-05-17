@@ -52,12 +52,14 @@ const (
 	azureLabelMachinePublicIP      = azureLabel + "machine_public_ip"
 	azureLabelMachineTag           = azureLabel + "machine_tag_"
 	azureLabelMachineScaleSet      = azureLabel + "machine_scale_set"
+	azureLabelPowerState           = azureLabel + "machine_power_state"
 
 	authMethodOAuth           = "OAuth"
 	authMethodManagedIdentity = "ManagedIdentity"
 
-	powerStateFormat  = `^PowerState/(\w+)$`
-	powerStateRunning = "running"
+	powerStateFormat      = `^PowerState/(\w+)$`
+	powerStateUnknown     = "unknown"
+	powerStateDeallocated = "deallocated"
 )
 
 var powerStateRE *regexp.Regexp
@@ -231,6 +233,7 @@ type virtualMachine struct {
 	ScaleSet          string
 	Tags              map[string]*string
 	NetworkInterfaces []string
+	PowerState        string
 }
 
 // Create a new azureResource object from an ID string.
@@ -306,6 +309,13 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				return
 			}
 
+			// Skip service discovery for deallocated VM
+			if strings.EqualFold(vm.PowerState, powerStateDeallocated) {
+				level.Debug(d.logger).Log("msg", "Skipping virtual machine", "VM name", vm.Name, "power state", vm.PowerState)
+				ch <- target{}
+				return
+			}
+
 			labels := model.LabelSet{
 				azureLabelSubscriptionID:       model.LabelValue(d.cfg.SubscriptionID),
 				azureLabelTenantID:             model.LabelValue(d.cfg.TenantID),
@@ -314,6 +324,7 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				azureLabelMachineOSType:        model.LabelValue(vm.OsType),
 				azureLabelMachineLocation:      model.LabelValue(vm.Location),
 				azureLabelMachineResourceGroup: model.LabelValue(r.ResourceGroup),
+				azureLabelPowerState:           model.LabelValue(vm.PowerState),
 			}
 
 			if vm.ScaleSet != "" {
@@ -381,57 +392,46 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	return []*targetgroup.Group{&tg}, nil
 }
 
-func (client *azureClient) isRunningVM(ctx context.Context, vm *compute.VirtualMachine) bool {
+func (client *azureClient) getVMInstanceView(ctx context.Context, vm compute.VirtualMachine) (*compute.VirtualMachineInstanceView, error) {
 	r, err := newAzureResourceFromID(*vm.ID, client.logger)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	instanceView, err := client.vm.InstanceView(ctx, r.ResourceGroup, *vm.Name)
 	if err != nil {
-		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VM name", *vm.Name, "err", err)
-		return false
+		return nil, err
 	}
-	return client.isVMPowerStateRunning(instanceView.Statuses, *vm.Name)
+	return &instanceView, nil
 }
 
-func (client *azureClient) isRunningScaleSetVM(ctx context.Context, vmss *compute.VirtualMachineScaleSet, vm *compute.VirtualMachineScaleSetVM) bool {
+func (client *azureClient) getScaleSetVMInstanceView(ctx context.Context, vm compute.VirtualMachineScaleSetVM, scaleSetName string) (*compute.VirtualMachineScaleSetVMInstanceView, error) {
 	r, err := newAzureResourceFromID(*vm.ID, client.logger)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	instanceView, err := client.vmssvm.GetInstanceView(ctx, r.ResourceGroup, *vmss.Name, r.Subname)
+	instanceView, err := client.vmssvm.GetInstanceView(ctx, r.ResourceGroup, scaleSetName, r.Subname)
 	if err != nil {
-		level.Error(client.logger).Log("msg", "failed to get InstanceView", "VMSS name", *vmss.Name, "VM name", *vm.Name, "err", err)
-		return false
+		return nil, err
 	}
-	return client.isVMPowerStateRunning(instanceView.Statuses, *vm.Name)
+	return &instanceView, nil
 }
 
-// isVMPowerStateRunning returns true if the VM is up and running
+// getPowerState returns current power state of the VM
 // ref: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/states-lifecycle
-func (client *azureClient) isVMPowerStateRunning(statuses *[]compute.InstanceViewStatus, vmName string) bool {
+func getPowerState(statuses *[]compute.InstanceViewStatus) string {
 	if statuses == nil {
-		level.Error(client.logger).Log("msg", "failed to determine power state due to incomplete InstanceView", "VM name", vmName)
-		return false
+		return powerStateUnknown
 	}
 	// []compute.InstanceViewStatus contains VM information such as provisioning status, power state, etc.
 	for _, status := range *statuses {
 		if status.Code != nil {
 			parts := powerStateRE.FindStringSubmatch(*status.Code)
 			if len(parts) == 2 {
-				powerState := parts[1]
-				switch powerState {
-				case powerStateRunning:
-					return true
-				default:
-					level.Debug(client.logger).Log("msg", "virtual machine is not running", "VM name", vmName, "power state", powerState)
-					return false
-				}
+				return parts[1]
 			}
 		}
 	}
-	level.Error(client.logger).Log("msg", "failed to determine power state due to missing status", "VM name", vmName)
-	return false
+	return powerStateUnknown
 }
 
 func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error) {
@@ -442,9 +442,15 @@ func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error)
 	}
 	for result.NotDone() {
 		for _, vm := range result.Values() {
-			if client.isRunningVM(ctx, &vm) {
-				vms = append(vms, mapFromVM(vm))
+			if vm.InstanceView == nil {
+				if instanceView, err := client.getVMInstanceView(ctx, vm); err != nil {
+					level.Error(client.logger).Log("msg", "failed to get InstanceView", "VM name", *vm.Name, "err", err)
+					vm.InstanceView = &compute.VirtualMachineInstanceView{}
+				} else {
+					vm.InstanceView = instanceView
+				}
 			}
+			vms = append(vms, mapFromVM(vm))
 		}
 		err = result.NextWithContext(ctx)
 		if err != nil {
@@ -487,9 +493,15 @@ func (client *azureClient) getScaleSetVMs(ctx context.Context, scaleSet compute.
 	}
 	for result.NotDone() {
 		for _, vm := range result.Values() {
-			if client.isRunningScaleSetVM(ctx, &scaleSet, &vm) {
-				vms = append(vms, mapFromVMScaleSetVM(vm, *scaleSet.Name))
+			if vm.InstanceView == nil {
+				if instanceView, err := client.getScaleSetVMInstanceView(ctx, vm, *scaleSet.Name); err != nil {
+					level.Error(client.logger).Log("msg", "failed to get InstanceView", "VM name", *vm.Name, "err", err)
+					vm.InstanceView = &compute.VirtualMachineScaleSetVMInstanceView{}
+				} else {
+					vm.InstanceView = instanceView
+				}
 			}
+			vms = append(vms, mapFromVMScaleSetVM(vm, *scaleSet.Name))
 		}
 		err = result.NextWithContext(ctx)
 		if err != nil {
@@ -524,6 +536,7 @@ func mapFromVM(vm compute.VirtualMachine) virtualMachine {
 		ScaleSet:          "",
 		Tags:              tags,
 		NetworkInterfaces: networkInterfaces,
+		PowerState:        getPowerState(vm.InstanceView.Statuses),
 	}
 }
 
@@ -551,6 +564,7 @@ func mapFromVMScaleSetVM(vm compute.VirtualMachineScaleSetVM, scaleSetName strin
 		ScaleSet:          scaleSetName,
 		Tags:              tags,
 		NetworkInterfaces: networkInterfaces,
+		PowerState:        getPowerState(vm.InstanceView.Statuses),
 	}
 }
 

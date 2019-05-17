@@ -28,6 +28,10 @@ func TestMapFromVMWithEmptyTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
+	provisioningStatusCode := "ProvisioningState/succeeded"
+	provisionDisplayStatus := "Provisioning succeeded"
+	powerStatusCode := "PowerState/running"
+	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -35,6 +39,20 @@ func TestMapFromVMWithEmptyTags(t *testing.T) {
 			},
 		},
 		NetworkProfile: &networkProfile,
+		InstanceView: &compute.VirtualMachineInstanceView{
+			Statuses: &[]compute.InstanceViewStatus{
+				{
+					Code:          &provisioningStatusCode,
+					Level:         "Info",
+					DisplayStatus: &provisionDisplayStatus,
+				},
+				{
+					Code:          &powerStatusCode,
+					Level:         "Info",
+					DisplayStatus: &powerDisplayStatus,
+				},
+			},
+		},
 	}
 
 	testVM := compute.VirtualMachine{
@@ -54,6 +72,7 @@ func TestMapFromVMWithEmptyTags(t *testing.T) {
 		OsType:            "Linux",
 		Tags:              map[string]*string{},
 		NetworkInterfaces: []string{},
+		PowerState:        "running",
 	}
 
 	actualVM := mapFromVM(testVM)
@@ -71,6 +90,10 @@ func TestMapFromVMWithTags(t *testing.T) {
 	tags := map[string]*string{
 		"prometheus": new(string),
 	}
+	provisioningStatusCode := "ProvisioningState/succeeded"
+	provisionDisplayStatus := "Provisioning succeeded"
+	powerStatusCode := "PowerState/running"
+	powerDisplayStatus := "VM running"
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
@@ -81,6 +104,20 @@ func TestMapFromVMWithTags(t *testing.T) {
 			},
 		},
 		NetworkProfile: &networkProfile,
+		InstanceView: &compute.VirtualMachineInstanceView{
+			Statuses: &[]compute.InstanceViewStatus{
+				{
+					Code:          &provisioningStatusCode,
+					Level:         "Info",
+					DisplayStatus: &provisionDisplayStatus,
+				},
+				{
+					Code:          &powerStatusCode,
+					Level:         "Info",
+					DisplayStatus: &powerDisplayStatus,
+				},
+			},
+		},
 	}
 
 	testVM := compute.VirtualMachine{
@@ -100,6 +137,7 @@ func TestMapFromVMWithTags(t *testing.T) {
 		OsType:            "Linux",
 		Tags:              tags,
 		NetworkInterfaces: []string{},
+		PowerState:        "running",
 	}
 
 	actualVM := mapFromVM(testVM)
@@ -117,6 +155,10 @@ func TestMapFromVMScaleSetVMWithEmptyTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
+	provisioningStatusCode := "ProvisioningState/succeeded"
+	provisionDisplayStatus := "Provisioning succeeded"
+	powerStatusCode := "PowerState/running"
+	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineScaleSetVMProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -124,6 +166,20 @@ func TestMapFromVMScaleSetVMWithEmptyTags(t *testing.T) {
 			},
 		},
 		NetworkProfile: &networkProfile,
+		InstanceView: &compute.VirtualMachineScaleSetVMInstanceView{
+			Statuses: &[]compute.InstanceViewStatus{
+				{
+					Code:          &provisioningStatusCode,
+					Level:         "Info",
+					DisplayStatus: &provisionDisplayStatus,
+				},
+				{
+					Code:          &powerStatusCode,
+					Level:         "Info",
+					DisplayStatus: &powerDisplayStatus,
+				},
+			},
+		},
 	}
 
 	testVM := compute.VirtualMachineScaleSetVM{
@@ -145,6 +201,7 @@ func TestMapFromVMScaleSetVMWithEmptyTags(t *testing.T) {
 		Tags:              map[string]*string{},
 		NetworkInterfaces: []string{},
 		ScaleSet:          scaleSet,
+		PowerState:        "running",
 	}
 
 	actualVM := mapFromVMScaleSetVM(testVM, scaleSet)
@@ -165,6 +222,10 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 	networkProfile := compute.NetworkProfile{
 		NetworkInterfaces: &[]compute.NetworkInterfaceReference{},
 	}
+	provisioningStatusCode := "ProvisioningState/succeeded"
+	provisionDisplayStatus := "Provisioning succeeded"
+	powerStatusCode := "PowerState/running"
+	powerDisplayStatus := "VM running"
 	properties := &compute.VirtualMachineScaleSetVMProperties{
 		StorageProfile: &compute.StorageProfile{
 			OsDisk: &compute.OSDisk{
@@ -172,6 +233,20 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 			},
 		},
 		NetworkProfile: &networkProfile,
+		InstanceView: &compute.VirtualMachineScaleSetVMInstanceView{
+			Statuses: &[]compute.InstanceViewStatus{
+				{
+					Code:          &provisioningStatusCode,
+					Level:         "Info",
+					DisplayStatus: &provisionDisplayStatus,
+				},
+				{
+					Code:          &powerStatusCode,
+					Level:         "Info",
+					DisplayStatus: &powerDisplayStatus,
+				},
+			},
+		},
 	}
 
 	testVM := compute.VirtualMachineScaleSetVM{
@@ -193,11 +268,59 @@ func TestMapFromVMScaleSetVMWithTags(t *testing.T) {
 		Tags:              tags,
 		NetworkInterfaces: []string{},
 		ScaleSet:          scaleSet,
+		PowerState:        "running",
 	}
 
 	actualVM := mapFromVMScaleSetVM(testVM, scaleSet)
 
 	if !reflect.DeepEqual(expectedVM, actualVM) {
 		t.Errorf("Expected %v got %v", expectedVM, actualVM)
+	}
+}
+
+func TestGetPowerStatusFromVM(t *testing.T) {
+	provisioningStatusCode := "ProvisioningState/succeeded"
+	provisionDisplayStatus := "Provisioning succeeded"
+	powerStatusCode := "PowerState/running"
+	powerDisplayStatus := "VM running"
+	properties := &compute.VirtualMachineScaleSetVMProperties{
+		StorageProfile: &compute.StorageProfile{
+			OsDisk: &compute.OSDisk{
+				OsType: "Linux",
+			},
+		},
+		InstanceView: &compute.VirtualMachineScaleSetVMInstanceView{
+			Statuses: &[]compute.InstanceViewStatus{
+				{
+					Code:          &provisioningStatusCode,
+					Level:         "Info",
+					DisplayStatus: &provisionDisplayStatus,
+				},
+				{
+					Code:          &powerStatusCode,
+					Level:         "Info",
+					DisplayStatus: &powerDisplayStatus,
+				},
+			},
+		},
+	}
+
+	testVM := compute.VirtualMachineScaleSetVM{
+		VirtualMachineScaleSetVMProperties: properties,
+	}
+
+	actual := getPowerState(testVM.VirtualMachineScaleSetVMProperties.InstanceView.Statuses)
+	expected := "running"
+	if actual != expected {
+		t.Errorf("expected powerStatus %s, but got %s instead", expected, actual)
+	}
+
+	// Noq we test a virtualMachine with an empty InstanceView struct.
+	testVM.VirtualMachineScaleSetVMProperties.InstanceView = &compute.VirtualMachineScaleSetVMInstanceView{}
+
+	actual = getPowerState(testVM.VirtualMachineScaleSetVMProperties.InstanceView.Statuses)
+	expected = powerStateUnknown
+	if actual != expected {
+		t.Errorf("expected powerStatus %s, but got %s instead", expected, actual)
 	}
 }
