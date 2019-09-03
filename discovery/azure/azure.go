@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -147,10 +146,11 @@ type azureClient struct {
 	vm     compute.VirtualMachinesClient
 	vmss   compute.VirtualMachineScaleSetsClient
 	vmssvm compute.VirtualMachineScaleSetVMsClient
+	logger log.Logger
 }
 
 // createAzureClient is a helper function for creating an Azure compute client to ARM.
-func createAzureClient(cfg SDConfig) (azureClient, error) {
+func createAzureClient(cfg SDConfig, logger log.Logger) (azureClient, error) {
 	env, err := azure.EnvironmentFromName(cfg.Environment)
 	if err != nil {
 		return azureClient{}, err
@@ -159,7 +159,7 @@ func createAzureClient(cfg SDConfig) (azureClient, error) {
 	activeDirectoryEndpoint := env.ActiveDirectoryEndpoint
 	resourceManagerEndpoint := env.ResourceManagerEndpoint
 
-	var c azureClient
+	c := azureClient{logger: logger}
 
 	var spt *adal.ServicePrincipalToken
 
@@ -205,8 +205,9 @@ func createAzureClient(cfg SDConfig) (azureClient, error) {
 
 // azureResource represents a resource identifier in Azure.
 type azureResource struct {
-	Name          string
 	ResourceGroup string
+	Name          string
+	Subname       string
 }
 
 // virtualMachine represents an Azure virtual machine (which can also be created by a VMSS)
@@ -234,16 +235,22 @@ func newAzureResourceFromID(id string, logger log.Logger) (azureResource, error)
 		return azureResource{}, err
 	}
 
+	var subname string
+	if len(s) == 11 {
+		subname = strings.ToLower(s[10])
+	}
+
 	return azureResource{
-		Name:          strings.ToLower(s[8]),
 		ResourceGroup: strings.ToLower(s[4]),
+		Name:          strings.ToLower(s[8]),
+		Subname:       subname,
 	}, nil
 }
 
 func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	defer level.Debug(d.logger).Log("msg", "Azure discovery completed")
 
-	client, err := createAzureClient(*d.cfg)
+	client, err := createAzureClient(*d.cfg, d.logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create Azure client")
 	}
@@ -288,6 +295,12 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 				return
 			}
 
+			/* Skip service discovery for deallocated VM.
+			if strings.EqualFold(vm.PowerState, powerStateDeallocated) {
+				level.Debug(d.logger).Log("msg", "Skipping virtual machine", "VM name", vm.Name, "power state", vm.PowerState)
+				return
+			}*/
+
 			labels := model.LabelSet{
 				azureLabelSubscriptionID:       model.LabelValue(d.cfg.SubscriptionID),
 				azureLabelTenantID:             model.LabelValue(d.cfg.TenantID),
@@ -324,19 +337,13 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 					continue
 				}
 
-				// Unfortunately Azure does not return information on whether a VM is deallocated.
-				// This information is available via another API call however the Go SDK does not
-				// yet support this. On deallocated machines, this value happens to be nil so it
-				// is a cheap and easy way to determine if a machine is allocated or not.
-				if networkInterface.Primary == nil {
-					level.Debug(d.logger).Log("msg", "Skipping deallocated virtual machine", "machine", vm.Name)
-					return
-				}
-
 				if *networkInterface.Primary {
 					for _, ip := range *networkInterface.IPConfigurations {
-						if ip.PublicIPAddress != nil && ip.PublicIPAddress.PublicIPAddressPropertiesFormat != nil {
+						if ip.PublicIPAddress != nil {
+							fmt.Printf("ip.PublicIPAddress %#v", *ip.PublicIPAddress)
+							//if publicIP, err := client.getPublicIP(ctx, *ip.PublicIPAddress.ID); err == nil {
 							labels[azureLabelMachinePublicIP] = model.LabelValue(*ip.PublicIPAddress.IPAddress)
+							//}
 						}
 						if ip.PrivateIPAddress != nil {
 							labels[azureLabelMachinePrivateIP] = model.LabelValue(*ip.PrivateIPAddress)
@@ -489,30 +496,14 @@ func mapFromVMScaleSetVM(vm compute.VirtualMachineScaleSetVM, scaleSetName strin
 }
 
 func (client *azureClient) getNetworkInterfaceByID(ctx context.Context, networkInterfaceID string) (*network.Interface, error) {
-	result := network.Interface{}
-	queryParameters := map[string]interface{}{
-		"api-version": "2018-10-01",
-	}
-
-	preparer := autorest.CreatePreparer(
-		autorest.AsGet(),
-		autorest.WithBaseURL(client.nic.BaseURI),
-		autorest.WithPath(networkInterfaceID),
-		autorest.WithQueryParameters(queryParameters))
-	req, err := preparer.Prepare((&http.Request{}).WithContext(ctx))
+	fmt.Println("getNetworkInterfaceByID", networkInterfaceID)
+	r, err := newAzureResourceFromID(networkInterfaceID, client.logger)
 	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", nil, "Failure preparing request")
+		return nil, err
 	}
-
-	resp, err := client.nic.GetSender(req)
+	result, err := client.nic.Get(ctx, r.ResourceGroup, r.Name, "ipConfigurations")
 	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", resp, "Failure sending request")
+		return nil, err
 	}
-
-	result, err = client.nic.GetResponder(resp)
-	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", resp, "Failure responding to request")
-	}
-
 	return &result, nil
 }
